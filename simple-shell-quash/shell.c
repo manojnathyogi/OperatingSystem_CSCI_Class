@@ -132,65 +132,82 @@ void handle_input_redirection(char *arguments[]) {
 }
 
 // Handle piping with `|`
-void handle_pipe(char *arguments[]) {
+bool handle_pipe(char *arguments[]) {
     int i = 0;
     while (arguments[i] != NULL) {
         if (strcmp(arguments[i], "|") == 0) {
             arguments[i] = NULL;
 
             int pipefd[2];
-            pipe(pipefd);
+            if (pipe(pipefd) == -1) {
+                perror("pipe error");
+                return false;
+            }
 
-            if (fork() == 0) {
-                dup2(pipefd[1], STDOUT_FILENO);
-                close(pipefd[0]);
+            pid_t pid1 = fork();
+            if (pid1 == 0) {
+                dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to pipe write end
+                close(pipefd[0]);  // Close unused read end
+                close(pipefd[1]);
                 execvp(arguments[0], arguments);
                 perror("execvp error");
                 exit(1);
+            } else if (pid1 < 0) {
+                perror("fork error");
+                return false;
             }
 
-            if (fork() == 0) {
-                dup2(pipefd[0], STDIN_FILENO);
-                close(pipefd[1]);
+            pid_t pid2 = fork();
+            if (pid2 == 0) {
+                dup2(pipefd[0], STDIN_FILENO);  // Redirect stdin to pipe read end
+                close(pipefd[1]);  // Close unused write end
+                close(pipefd[0]);
                 execvp(arguments[i + 1], &arguments[i + 1]);
                 perror("execvp error");
                 exit(1);
+            } else if (pid2 < 0) {
+                perror("fork error");
+                return false;
             }
 
             close(pipefd[0]);
             close(pipefd[1]);
-            wait(NULL);
-            wait(NULL);
-            return;
+            waitpid(pid1, NULL, 0);  // Wait for the first process
+            waitpid(pid2, NULL, 0);  // Wait for the second process
+            return true;  // Pipe was handled
         }
         i++;
     }
+    return false;  // No pipe found
 }
 
 // Execute external commands
 void execute_command(char *arguments[], bool is_background) {
-    if (handle_pipe(arguments)) return;
+    if (handle_pipe(arguments)) return;  // Skip further execution if pipe handled
 
     pid_t pid = fork();
     if (pid == 0) {
-        signal(SIGINT, SIG_DFL);
-        handle_output_redirection(arguments);
-        handle_input_redirection(arguments);
-        execvp(arguments[0], arguments);
+        signal(SIGINT, SIG_DFL);  // Restore default SIGINT behavior in child
+        handle_output_redirection(arguments);  // Handle output redirection
+        handle_input_redirection(arguments);  // Handle input redirection
+        execvp(arguments[0], arguments);  // Execute the command
         perror("execvp error");
         exit(1);
+    } else if (pid < 0) {
+        perror("fork error");
     } else {
         if (!is_background) {
-            fg_process_pid = pid;
-            alarm(10);
-            waitpid(pid, NULL, 0);
-            alarm(0);
-            fg_process_pid = -1;
+            fg_process_pid = pid;  // Track the foreground process PID
+            alarm(10);  // Set a 10-second timer for long-running processes
+            waitpid(pid, NULL, 0);  // Wait for the child process to complete
+            alarm(0);  // Cancel the timer
+            fg_process_pid = -1;  // Reset the foreground process PID
         } else {
             printf("Process running in background with PID: %d\n", pid);
         }
     }
 }
+
 
 // Main function to run the shell
 int main() {
